@@ -13,7 +13,7 @@ namespace LiteDbServices.Attributes
             _minElements = minElements;
         }
 
-        protected override ValidationResult IsValid(object value, ValidationContext validationContext)
+        protected override ValidationResult? IsValid(object? value, ValidationContext validationContext)
         {
             if (value is ICollection collection && collection.Count < _minElements)
             {

@@ -1,0 +1,37 @@
+@APIWebApplication_HostAddress = http://localhost:port
+
+### Get all products
+GET {{APIWebApplication_HostAddress}}/api/products
+
+### Get product by id
+GET {{APIWebApplication_HostAddress}}/api/products/{id}
+
+### Get product by name
+GET {{APIWebApplication_HostAddress}}/api/products/search/{name}
+
+### Create a new product
+POST {{APIWebApplication_HostAddress}}/api/products
+Content-Type: application/json
+
+{  
+  "name": "T-Shirt5",
+  "price": 19.99,
+  "colors": ["red"]
+ }
+  
+
+### Update an existing product
+PUT {{APIWebApplication_HostAddress}}/api/products/{id}
+Content-Type: application/json
+
+{
+  "name": "Updated Product",
+  "price": 29.99,
+  "colors": ["red"]
+}
+
+### Delete a product
+DELETE {{APIWebApplication_HostAddress}}/api/products/{id}
+
+### Delete all
+DELETE {{APIWebApplication_HostAddress}}/api/products/all

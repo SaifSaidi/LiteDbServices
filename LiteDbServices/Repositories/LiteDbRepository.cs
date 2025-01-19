@@ -1,50 +1,71 @@
-﻿using LiteDbServices.Exceptions;
-using LiteDbServices.Models;
-using LiteDB;
-using System.ComponentModel.DataAnnotations;
-using System.Linq.Expressions;
-
+﻿using LiteDbServices.Models;
 namespace LiteDbServices.Repositories
 {
-
-    public class LiteDbRepository<T> : IRepository<T> where T : ILiteEntity
+    using LiteDB;
+    using System;
+    using System.Collections;
+    using System.Collections.Generic;
+    using System.Linq.Expressions;
+    using System.Threading.Tasks;
+    public class LiteDbRepository<T, TKey> : IRepository<T, TKey> where T : LiteEntity<TKey>
     {
-        private readonly ILiteDatabase _database;
+        private readonly LiteDatabase _db;
         private readonly ILiteCollection<T> _collection;
-        private readonly ILiteStorage<string> _storage;
 
-        public LiteDbRepository(ILiteDatabase database)
+        private TKey GetGenerateId()
         {
-            _database = database;
-            _collection = database.GetCollection<T>(typeof(T).Name);
-            _storage = database.FileStorage;
-        }
-
-
-        public async Task<T> GetByIdAsync(ObjectId id)
-        { 
-            var entity = await Task.FromResult(_collection.FindById(id));
-            if (entity == null)
+            if (typeof(TKey) == typeof(Guid))
             {
-                throw new EntityNotFoundException(typeof(T).Name, id);
+                return (TKey)(object)Guid.NewGuid();
             }
-            return entity;
-        }
-
-        public async Task<T> GetOneByQueryAsync(Expression<Func<T, bool>> query)
-        { 
-            var entity = await Task.FromResult(_collection.FindOne(query));
-            if (entity == null)
+            else if (typeof(TKey) == typeof(ObjectId))
             {
-                throw new EntityNotFoundException(typeof(T).Name, entity!.Id);
+                return (TKey)(object)ObjectId.NewObjectId();
             }
-            return entity;
+            else if (typeof(TKey) == typeof(Int32))
+            {
+                return (TKey)(object)new BsonValue().AsInt32;
+            }
+            else if (typeof(TKey) == typeof(Int64))
+            {
+                return (TKey)(object)new BsonValue().AsInt64;
+            }
+            else
+            {
+                throw new InvalidOperationException($"Cannot generate ID for type {typeof(TKey)}. Please provide an ID.");
+            }
         }
 
-        public async Task<IEnumerable<T>> GetAllByQueryAsync(Expression<Func<T, bool>> query,
-            int skip = 0, int limit = int.MaxValue)
-        {  
-            return await Task.FromResult(_collection.Find(query, skip, limit));
+        public LiteDbRepository(LiteDatabase db)
+        {
+            _db = db ?? throw new ArgumentNullException(nameof(db));
+            var collectionName = typeof(T).Name;
+            _collection = _db.GetCollection<T>(collectionName);
+             
+            var database = db.GetCollection("$database");
+
+            var databaseInfo = database.FindAll();
+
+            foreach (var info in databaseInfo)
+            {
+                Console.WriteLine($"database: {info}"); 
+                Console.WriteLine();
+            }
+
+            var indexes = db.GetCollection("$indexes");
+            var allIndexes = indexes.FindAll();
+
+            foreach (var index in allIndexes)
+            {
+                Console.WriteLine($"Collection: {index}");
+                Console.WriteLine();
+            }
+        }
+
+        public async Task<T> GetByIdAsync(TKey id)
+        {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+            return await Task.FromResult(_collection.FindById(new BsonValue(id)));
         }
 
         public async Task<IEnumerable<T>> GetAllAsync()
@@ -52,70 +73,196 @@ namespace LiteDbServices.Repositories
             return await Task.FromResult(_collection.FindAll());
         }
 
-        public async Task<ObjectId> CreateAsync(T entity)
+        public async Task<T> CreateAsync(T entity)
         {
-            var validationResults = entity.Validate();
-            if (validationResults.Any())
+            if (entity == null) throw new ArgumentNullException(nameof(entity));
+
+            if(entity.Id == null )
             {
-                throw new ValidationException(string.Join(", ", validationResults.Select(r => r.ErrorMessage)));
+                entity.Id = GetGenerateId();
+
             }
-            var bsonValue = _collection.Insert(entity); 
-            return await Task.FromResult(bsonValue);
+            _collection.Insert(entity);
+            return await Task.FromResult(entity);
         }
 
         public async Task UpdateAsync(T entity)
         {
-            var validationResults = entity.Validate();
-            if (validationResults.Any())
+            if (entity == null) throw new ArgumentNullException(nameof(entity));
+
+            var updated = _collection.Update(new BsonValue(entity.Id), entity);
+            if (!updated)
             {
-                throw new ValidationException(string.Join(", ", validationResults.Select(r => r.ErrorMessage)));
+                throw new KeyNotFoundException($"Entity with ID {entity.Id} not found.");
             }
-            var result = await Task.FromResult(_collection.Update(entity));
-            if (!result)
+            await Task.CompletedTask;
+        }
+
+        public async Task DeleteAsync(TKey id)
+        {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+
+            var deleted = _collection.Delete(new BsonValue(id));
+            if (!deleted)
             {
-                throw new EntityNotFoundException(typeof(T).Name, entity.Id);
+                throw new KeyNotFoundException($"Entity with ID {id} not found.");
             }
+            await Task.CompletedTask;
         }
 
-        public async Task DeleteAsync(ObjectId id)
+        public async Task<bool> ExistsAsync(TKey id)
         {
-            var result = await Task.FromResult(_collection.Delete(id));
-            if (!result)
+            if (id == null) throw new ArgumentNullException(nameof(id)); 
+            return await Task.FromResult(_collection.Exists(Query.EQ("_id", new BsonValue(id))));
+        }
+        public async Task<bool> ExistsAsync(BsonExpression BsonExpression)
+        {
+
+            if (BsonExpression == null) throw new ArgumentNullException(nameof(BsonExpression));
+            return await Task.FromResult(_collection.Exists(BsonExpression));
+        }
+
+       
+        public async Task<int> CountAsync()
+        {
+            return await Task.FromResult(_collection.Count());
+        }
+
+        public async Task<IEnumerable<T>> GetPagedAsync(int pageNumber, int pageSize)
+        {
+            var results = _collection.Find(Query.All(), (pageNumber - 1) * pageSize, pageSize);
+            return await Task.FromResult(results);
+        }
+
+        public async Task<IEnumerable<T>> FindAsync(Expression<Func<T, bool>> predicate, int skip = 0, int limit = int.MaxValue)
+        {
+            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+            var results = _collection.Find(predicate, skip, limit);
+            return await Task.FromResult(results);
+        }
+         public async Task<IEnumerable<T>> FindAsync(BsonExpression BsonExpression, int skip = 0, int limit = int.MaxValue)
+        {
+            if (BsonExpression == null) throw new ArgumentNullException(nameof(BsonExpression));
+            var results = _collection.Find(BsonExpression, skip, limit);
+            return await Task.FromResult(results);
+        }
+
+        public async Task<T> FirstOrDefaultAsync(Expression<Func<T, bool>> predicate)
+        {
+            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+            var result = _collection.FindOne(predicate);
+            return await Task.FromResult(result);
+        }
+        public async Task<T> FirstOrDefaultAsync(BsonExpression BsonExpression)
+        {
+            if (BsonExpression == null) throw new ArgumentNullException(nameof(BsonExpression));
+            var result = _collection.FindOne(BsonExpression);
+            return await Task.FromResult(result);
+        }
+
+        public async Task<T> SingleOrDefaultAsync(Expression<Func<T, bool>> predicate)
+        {
+            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+            var result = _collection.FindOne(predicate);
+            return await Task.FromResult(result);
+        } public async Task<T> SingleOrDefaultAsync(BsonExpression BsonExpression)
+        {
+            if (BsonExpression == null) throw new ArgumentNullException(nameof(BsonExpression));
+            var result = _collection.FindOne(BsonExpression);
+            return await Task.FromResult(result);
+        }
+
+        public async Task<IEnumerable<T>> CreateBulkAsync(IEnumerable<T> entities)
+        {
+            if (entities == null) throw new ArgumentNullException(nameof(entities));
+
+            foreach (var entity in entities)
             {
-                throw new EntityNotFoundException(typeof(T).Name, id);
+                entity.Id = GetGenerateId();
             }
+
+            _collection.InsertBulk(entities);
+            return await Task.FromResult(entities);
         }
 
-        public async Task<bool> ExistsAsync(ObjectId id)
+        public async Task UpdateBulkAsync(IEnumerable<T> entities)
         {
-            return await Task.FromResult(_collection.Exists(x => x.Id == id));
-        }
+            if (entities == null) throw new ArgumentNullException(nameof(entities));
 
-        public async Task<LiteFileInfo<string>> UploadFileAsync(string fileName, Stream fileStream)
-        {
-            LiteFileInfo<string> file = _storage.Upload(fileName, fileName, fileStream);
-            return await Task.FromResult(file);
-        }
-
-        public async Task<(Stream FileStream, string ContentType)> DownloadFileAsync(string fileName)
-        {
-            var fileInfo = _storage.FindById(fileName);
-            if (fileInfo == null)
+            foreach (var entity in entities)
             {
-                throw new EntityNotFoundException("File", fileName);
+                var updated = _collection.Update(entity);
+                if (!updated)
+                {
+                    throw new KeyNotFoundException($"Entity with ID {entity.Id} not found.");
+                }
             }
-            return await Task.FromResult((fileInfo.OpenRead(), fileInfo.MimeType));
+            await Task.CompletedTask;
         }
 
-        public async Task DeleteFileAsync(string fileName)
+        public async Task DeleteBulkAsync(IEnumerable<TKey> ids)
         {
-            var result = await Task.FromResult(_storage.Delete(fileName));
-            if (!result)
+            if (ids == null) throw new ArgumentNullException(nameof(ids));
+
+            foreach (var id in ids)
             {
-                throw new EntityNotFoundException("File", fileName);
+                var deleted = _collection.Delete(new BsonValue(id));
+                if (!deleted)
+                {
+                    throw new KeyNotFoundException($"Entity with ID {id} not found.");
+                }
             }
+            await Task.CompletedTask;
+        }
+        
+        public async Task<int> DeleteBulkAsync(BsonExpression BsonExpression)
+        {
+            var deleted = _collection.DeleteMany(BsonExpression);
+            if (deleted > 0)
+            {
+                return await Task.FromResult(deleted);
+            }
+            return await Task.FromResult(0);
         }
 
+        public async Task<int> ClearAsync()
+        {
+            var deleted = _collection.DeleteAll();
+            if (deleted > 0)
+            {
+                return await Task.FromResult(deleted);
+            }
+            return await Task.FromResult(0);
+        }
+
+        public async Task IncludeAsync<TInclude>(Expression<Func<T, TInclude>> includeExpression)
+        {
+            if (includeExpression == null) throw new ArgumentNullException(nameof(includeExpression));
+            _collection.Include(includeExpression);
+            await Task.CompletedTask;
+        }
+
+        public async Task UpsertAsync(T entity)
+        {
+            if (entity == null) throw new ArgumentNullException(nameof(entity));
+            _collection.Upsert(entity);
+            await Task.CompletedTask;
+        }
+
+        public async Task<bool> EnsureIndexAsync(Expression<Func<T, object>> indexExpression, bool unique = false)
+        {
+            if (indexExpression == null) throw new ArgumentNullException(nameof(indexExpression));
+            
+           return await Task.FromResult(_collection.EnsureIndex(indexExpression, unique));
+             
+        }
+
+        public async Task<ILiteQueryable<T>> QueryAsync()
+        {
+            return await Task.FromResult(_collection.Query());
+        }
     }
+
+     
 
 }
